@@ -14,4 +14,4 @@ struct ToxExtensionMessages* tox_extension_messages_register(
 void tox_extension_messages_free(struct ToxExtensionMessages* extension);
 
 void tox_extension_messages_negotiate(struct ToxExtensionMessages* extension, uint32_t friend_id);
-void tox_extension_messages_append(struct ToxExtensionMessages* extension, struct ToxExtPacket* packet, uint8_t const* data, size_t size);
+void tox_extension_messages_append(struct ToxExtensionMessages* extension, struct ToxExtPacketList* packet, uint8_t const* data, size_t size);
