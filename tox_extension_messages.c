@@ -82,7 +82,8 @@ static struct FriendState* get_or_insert_friend_state(
 // negotation callback when we've both negotiated that we have the extension
 // because at that point they don't know we can accept the message ids. We wait for
 // an enable flag from the other side to indicate that they are now embedding message ids.
-static void tox_extension_messages_recv(uint32_t friend_id, void const* data, size_t size, void* userdata, struct ToxExtPacket* response_packet) {
+static void tox_extension_messages_recv(struct ToxExtExtension* extension, uint32_t friend_id, void const* data, size_t size, void* userdata, struct ToxExtPacket* response_packet) {
+	(void)extension;
 	(void)response_packet;
 	struct ToxExtensionMessages *ext_message_ids = userdata;
 	struct FriendState* friend_state = get_friend_state(ext_message_ids, friend_id);
