@@ -11,3 +11,6 @@ set_target_properties(tox_extension_messages PROPERTIES PUBLIC_HEADER "tox_exten
 target_include_directories(tox_extension_messages PRIVATE "${TOXCORE_INCLUDEDIR}")
 
 install(TARGETS tox_extension_messages ARCHIVE DESTINATION lib PUBLIC_HEADER DESTINATION include)
+
+enable_testing()
+add_subdirectory(test)
