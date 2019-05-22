@@ -19,6 +19,13 @@ static void test_neg_cb(uint32_t friend_number, bool compatible, void* user_data
     (void)user_data;
 }
 
+static void test_receipt_cb(uint32_t friend_number, uint32_t receiptNum, void* user_data) {
+    (void)friend_number;
+    (void)receiptNum;
+    (void)user_data;
+}
+
+
 static struct ToxExtensionMessages* s_messages;
 
 
@@ -101,6 +108,7 @@ int main(void) {
     s_messages->incoming_messages = NULL;
     s_messages->incoming_messages_size = 0;
     s_messages->cb = test_cb;
+    s_messages->receipt_cb = test_receipt_cb;
     s_messages->negotiated_cb = test_neg_cb;
     s_messages->userdata = NULL;
 

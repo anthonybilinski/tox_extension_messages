@@ -9,17 +9,21 @@
 
 static uint8_t const uuid[16] = {0x9e, 0x10, 0x03, 0x16, 0xd2, 0x6f, 0x45, 0x39, 0x8c, 0xdb, 0xae, 0x81, 0x00, 0x42, 0xf8, 0x64};
 
+static uint32_t receipt_num = 0;
+
 struct IncomingMessage {
 	uint32_t friend_id;
 	uint8_t* message;
 	size_t size;
 	size_t capacity;
+	uint32_t receipt_num;
 };
 
 enum Messages {
 	MESSAGE_START,
 	MESSAGE_PART,
 	MESSAGE_FINISH,
+	MESSAGE_RECEIPT,
 };
 
 struct ToxExtensionMessages {
@@ -28,6 +32,7 @@ struct ToxExtensionMessages {
 	struct IncomingMessage* incoming_messages;
 	size_t incoming_messages_size;
 	tox_extension_messages_received_cb cb;
+	tox_extension_messages_receipt_cb receipt_cb;
 	tox_extension_messages_negotiate_cb negotiated_cb;
 	void* userdata;
 };
@@ -95,6 +100,7 @@ struct MessagesPacket {
 	size_t total_message_size;
 	uint8_t const* message_data;
 	size_t message_size;
+	uint32_t receipt_num;
 };
 
 bool parse_messages_packet(
@@ -111,6 +117,18 @@ bool parse_messages_packet(
 	messages_packet->message_type = *it;
 	it += 1;
 
+	if (messages_packet->message_type == MESSAGE_RECEIPT) {
+		if (it + 4 > end) {
+			return false;
+		}
+		messages_packet->receipt_num = 0;
+		messages_packet->receipt_num |= (uint32_t)*(it + 0) << 24;
+		messages_packet->receipt_num |= (uint32_t)*(it + 1) << 16;
+		messages_packet->receipt_num |= (uint32_t)*(it + 2) << 8;
+		messages_packet->receipt_num |= (uint32_t)*(it + 3) << 0;
+		return true;
+	}
+
 	if (messages_packet->message_type == MESSAGE_START) {
 		if (it + 8 > end) {
 			return false;
@@ -126,7 +144,13 @@ bool parse_messages_packet(
 		messages_packet->total_message_size |= (uint64_t)*(it + 5) << 16;
 		messages_packet->total_message_size |= (uint64_t)*(it + 6) << 8;
 		messages_packet->total_message_size |= (uint64_t)*(it + 7) << 0;
-		it += 8;
+
+		messages_packet->receipt_num = 0;
+		messages_packet->receipt_num |= (uint32_t)*(it + 8) << 24;
+		messages_packet->receipt_num |= (uint32_t)*(it + 9) << 16;
+		messages_packet->receipt_num |= (uint32_t)*(it + 10) << 8;
+		messages_packet->receipt_num |= (uint32_t)*(it + 11) << 0;
+		it += 12;
 	}
 
 	if (it > end) {
@@ -144,8 +168,6 @@ bool parse_messages_packet(
 // because at that point they don't know we can accept the message ids. We wait for
 // an enable flag from the other side to indicate that they are now embedding message ids.
 static void tox_extension_messages_recv(struct ToxExtExtension* extension, uint32_t friend_id, void const* data, size_t size, void* userdata, struct ToxExtPacketList* response_packet) {
-	(void)extension;
-	(void)response_packet;
 	struct ToxExtensionMessages *ext_message_ids = userdata;
 	struct IncomingMessage* incoming_message = get_incoming_message(ext_message_ids, friend_id);
 
@@ -156,6 +178,10 @@ static void tox_extension_messages_recv(struct ToxExtExtension* extension, uint3
 		return;
 	}
 
+	if (parsed_packet.message_type == MESSAGE_RECEIPT) {
+		ext_message_ids->receipt_cb(friend_id, parsed_packet.receipt_num, ext_message_ids->userdata);
+		return;
+	}
 
 	if (parsed_packet.message_type == MESSAGE_START) {
 		/*
@@ -172,6 +198,7 @@ static void tox_extension_messages_recv(struct ToxExtExtension* extension, uint3
 		incoming_message->message = resized_message;
 		incoming_message->size = 0;
 		incoming_message->capacity = parsed_packet.total_message_size;
+		incoming_message->receipt_num = parsed_packet.receipt_num;
 	}
 
 	if (parsed_packet.message_type == MESSAGE_FINISH && incoming_message->size == 0) {
@@ -197,6 +224,15 @@ static void tox_extension_messages_recv(struct ToxExtExtension* extension, uint3
 		if (ext_message_ids->cb) {
 			ext_message_ids->cb(friend_id, incoming_message->message, incoming_message->size, ext_message_ids->userdata);
 		}
+		uint32_t received_receipt_id = incoming_message->receipt_num;
+		uint8_t receipt_data[5];
+		receipt_data[0] = MESSAGE_RECEIPT;
+		receipt_data[1] = (received_receipt_id >> 24) & 0xff;
+		receipt_data[2] = (received_receipt_id >> 16) & 0xff;
+		receipt_data[3] = (received_receipt_id >> 8) & 0xff;
+		receipt_data[4] = (received_receipt_id) & 0xff;
+
+		toxext_packet_append(response_packet, extension, receipt_data, sizeof(receipt_data));
 		clear_incoming_message(incoming_message);
 	}
 }
@@ -212,6 +248,7 @@ static void tox_extension_messages_neg(struct ToxExtExtension* extension, uint32
 struct ToxExtensionMessages* tox_extension_messages_register(
     struct ToxExt* toxext,
     tox_extension_messages_received_cb cb,
+    tox_extension_messages_receipt_cb receipt_cb,
     tox_extension_messages_negotiate_cb neg_cb,
     void* userdata) {
 
@@ -222,6 +259,7 @@ struct ToxExtensionMessages* tox_extension_messages_register(
 	extension->incoming_messages = NULL;
 	extension->incoming_messages_size = 0;
 	extension->cb = cb;
+	extension->receipt_cb = receipt_cb;
 	extension->negotiated_cb = neg_cb;
 	extension->userdata = userdata;
 
@@ -272,9 +310,14 @@ static uint8_t const* tox_extension_messages_chunk(
 		extension_data[6] = (size >> 16) & 0xff;
 		extension_data[7] = (size >> 8) & 0xff;
 		extension_data[8] = (size) & 0xff;
+
+		extension_data[9] = (receipt_num >> 24) & 0xff;
+		extension_data[10] = (receipt_num >> 16) & 0xff;
+		extension_data[11] = (receipt_num >> 8) & 0xff;
+		extension_data[12] = (receipt_num) & 0xff;
 		// insert uint64_t here
-		size_t advance_size = TOXEXT_MAX_PACKET_SIZE - 9;
-		memcpy(extension_data + 9, data, advance_size);
+		size_t advance_size = TOXEXT_MAX_PACKET_SIZE - 13;
+		memcpy(extension_data + 13, data, advance_size);
 		*output_size = TOXEXT_MAX_PACKET_SIZE;
 		ret = data + advance_size;
 	}
@@ -289,16 +332,17 @@ static uint8_t const* tox_extension_messages_chunk(
 	return ret;
 }
 
-void tox_extension_messages_append(struct ToxExtensionMessages* extension, struct ToxExtPacketList* packet, uint8_t const* data, size_t size) {
+uint32_t tox_extension_messages_append(struct ToxExtensionMessages* extension, struct ToxExtPacketList* packet, uint8_t const* data, size_t size) {
 	uint8_t const* end = data + size;
 	uint8_t const* next_chunk = data;
 	bool first_chunk = true;
-    do {
+	do {
 		uint8_t extension_data[TOXEXT_MAX_PACKET_SIZE];
 		size_t size_for_chunk;
 		next_chunk = tox_extension_messages_chunk(first_chunk, next_chunk, end - next_chunk, extension_data, &size_for_chunk);
 		first_chunk = false;
 
 		toxext_packet_append(packet, extension->extension_handle, extension_data, size_for_chunk);
-    } while (end > next_chunk);
+	} while (end > next_chunk);
+	return receipt_num++;
 }
