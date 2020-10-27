@@ -19,10 +19,21 @@ struct IncomingMessage {
 };
 
 enum Messages {
+	MESSAGE_NEGOTIATE,
 	MESSAGE_START,
 	MESSAGE_PART,
 	MESSAGE_FINISH,
 	MESSAGE_RECEIVED,
+};
+
+struct FriendMaxSendingSize {
+	uint32_t friend_id;
+	uint64_t max_sending_message_size;
+};
+
+struct FriendSendingInvalidSize {
+	uint32_t friend_id;
+	bool sending_invalid;
 };
 
 struct ToxExtensionMessages {
@@ -35,6 +46,10 @@ struct ToxExtensionMessages {
 	tox_extension_messages_receipt_cb receipt_cb;
 	tox_extension_messages_negotiate_cb negotiated_cb;
 	void *userdata;
+	size_t num_negotiated;
+	struct FriendMaxSendingSize *max_sending_message_sizes;
+	struct FriendSendingInvalidSize *ongoing_invalid_messages;
+	uint64_t max_receiving_message_size;
 };
 
 static struct IncomingMessage *
@@ -111,7 +126,21 @@ struct MessagesPacket {
 	uint8_t const *message_data;
 	size_t message_size;
 	size_t receipt_id;
+	uint64_t max_sending_message_size;
 };
+
+struct FriendSendingInvalidSize *
+get_friend_dropping(struct ToxExtensionMessages *extension, uint32_t friend_id)
+{
+	for (size_t i = 0; i < extension->num_negotiated; ++i) {
+		if (extension->ongoing_invalid_messages[i].friend_id ==
+		    friend_id) {
+			return &extension->ongoing_invalid_messages[i];
+		}
+	}
+	assert(false);
+	return NULL;
+}
 
 bool parse_messages_packet(uint8_t const *data, size_t size,
 			   struct MessagesPacket *messages_packet)
@@ -147,6 +176,12 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 		it += 8;
 	}
 
+	if (messages_packet->message_type == MESSAGE_NEGOTIATE) {
+		messages_packet->max_sending_message_size =
+			toxext_read_from_buf(uint64_t, it, 8);
+		it += 8;
+	}
+
 	if (it > end) {
 		return false;
 	}
@@ -155,6 +190,59 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 	messages_packet->message_size = end - it;
 
 	return true;
+}
+
+void tox_extension_messages_negotiate_size_cb(
+	struct ToxExtensionMessages *extension, uint32_t friend_id,
+	uint64_t max_sending_message_size)
+{
+	struct FriendMaxSendingSize *new_max_sendings_sizes =
+		realloc(extension->max_sending_message_sizes,
+			(extension->num_negotiated + 1) *
+				sizeof(struct FriendMaxSendingSize));
+	if (!new_max_sendings_sizes) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		return;
+	}
+
+	struct FriendSendingInvalidSize *new_ongoing_invalid_messages =
+		realloc(extension->ongoing_invalid_messages,
+			(extension->num_negotiated + 1) *
+				sizeof(struct FriendSendingInvalidSize));
+	if (!new_ongoing_invalid_messages) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		return;
+	}
+
+	extension->max_sending_message_sizes = new_max_sendings_sizes;
+	extension->ongoing_invalid_messages = new_ongoing_invalid_messages;
+	extension->num_negotiated++;
+
+	struct FriendMaxSendingSize *new_max_size =
+		&extension->max_sending_message_sizes[extension->num_negotiated -
+						      1];
+	new_max_size->friend_id = friend_id;
+	new_max_size->max_sending_message_size = max_sending_message_size;
+
+	struct FriendSendingInvalidSize *new_sending_invalid =
+		&extension->ongoing_invalid_messages[extension->num_negotiated -
+						     1];
+	new_sending_invalid->friend_id = friend_id;
+	new_sending_invalid->sending_invalid = false;
+
+	extension->negotiated_cb(friend_id, true, extension->userdata);
+}
+
+void tox_extension_messages_negotiate_size(
+	struct ToxExtensionMessages *extension,
+	struct ToxExtPacketList *response_packet_list)
+{
+	uint8_t data[9];
+	data[0] = MESSAGE_NEGOTIATE;
+	toxext_write_to_buf(extension->max_receiving_message_size, data + 1, 8);
+	toxext_segment_append(response_packet_list, extension->extension_handle,
+			      data, 9);
+	return;
 }
 
 void tox_extension_copy_in_message_data(struct MessagesPacket *parsed_packet,
@@ -173,9 +261,18 @@ void tox_extension_copy_in_message_data(struct MessagesPacket *parsed_packet,
 }
 
 void tox_extension_messages_handle_message_start(
+	struct ToxExtensionMessages *extension, uint32_t friend_id,
 	struct MessagesPacket *parsed_packet,
 	struct IncomingMessage *incoming_message)
 {
+	if (extension->max_receiving_message_size <
+	    parsed_packet->total_message_size) {
+		struct FriendSendingInvalidSize *friend_dropping =
+			get_friend_dropping(extension, friend_id);
+		friend_dropping->sending_invalid = true;
+		return;
+	}
+
 	/*
 		* realloc here instead of malloc because we may have dropped half a message
 		* if a user went offline half way through sending
@@ -203,6 +300,19 @@ void tox_extension_messages_handle_message_finish(
 {
 	/* We can skip the allocate/memcpy here */
 	if (incoming_message->size == 0) {
+		struct FriendSendingInvalidSize *friend_dropping =
+			get_friend_dropping(extension, friend_id);
+		bool end_of_dropped_message = friend_dropping->sending_invalid;
+		friend_dropping->sending_invalid = false;
+
+		if (end_of_dropped_message ||
+		    extension->max_receiving_message_size <
+			    parsed_packet->message_size) {
+			/* FIXME: We should probably tell the sender that we dropped a message here */
+			clear_incoming_message(incoming_message);
+			return;
+		}
+
 		if (extension->cb) {
 			extension->cb(friend_id, parsed_packet->message_data,
 				      parsed_packet->message_size,
@@ -220,6 +330,18 @@ void tox_extension_messages_handle_message_finish(
 
 	tox_extension_copy_in_message_data(parsed_packet, incoming_message);
 
+	struct FriendSendingInvalidSize *friend_dropping =
+		get_friend_dropping(extension, friend_id);
+	bool end_of_dropped_message = friend_dropping->sending_invalid;
+	friend_dropping->sending_invalid = false;
+
+	if (end_of_dropped_message ||
+	    extension->max_receiving_message_size < incoming_message->size) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		clear_incoming_message(incoming_message);
+		return;
+	}
+
 	if (extension->cb) {
 		extension->cb(friend_id, incoming_message->message,
 			      incoming_message->size, extension->userdata);
@@ -232,6 +354,21 @@ void tox_extension_messages_handle_message_finish(
 			      data, 9);
 
 	clear_incoming_message(incoming_message);
+}
+
+void tox_extension_messages_handle_message_part(
+	struct ToxExtensionMessages *extension, uint32_t friend_id,
+	struct MessagesPacket *parsed_packet,
+	struct IncomingMessage *incoming_message)
+{
+	struct FriendSendingInvalidSize *friend_dropping =
+		get_friend_dropping(extension, friend_id);
+	if (friend_dropping->sending_invalid) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		clear_incoming_message(incoming_message);
+		return;
+	}
+	tox_extension_copy_in_message_data(parsed_packet, incoming_message);
 }
 
 static void
@@ -253,13 +390,22 @@ tox_extension_messages_recv(struct ToxExtExtension *extension,
 	}
 
 	switch (parsed_packet.message_type) {
+	case MESSAGE_NEGOTIATE:
+		tox_extension_messages_negotiate_size_cb(
+			ext_messages, friend_id,
+			parsed_packet.max_sending_message_size);
+		return;
 	case MESSAGE_START:
-		tox_extension_messages_handle_message_start(&parsed_packet,
+		tox_extension_messages_handle_message_start(ext_messages,
+							    friend_id,
+							    &parsed_packet,
 							    incoming_message);
 		return;
 	case MESSAGE_PART: {
-		tox_extension_copy_in_message_data(&parsed_packet,
-						   incoming_message);
+		tox_extension_messages_handle_message_part(ext_messages,
+							   friend_id,
+							   &parsed_packet,
+							   incoming_message);
 		return;
 	}
 	case MESSAGE_FINISH:
@@ -280,17 +426,23 @@ tox_extension_messages_neg(struct ToxExtExtension *extension,
 			   struct ToxExtPacketList *response_packet_list)
 {
 	(void)extension;
-	(void)response_packet_list;
-	struct ToxExtensionMessages *ext_message_ids = userdata;
-	get_or_insert_incoming_message(ext_message_ids, friend_id);
-	ext_message_ids->negotiated_cb(friend_id, compatible,
-				       ext_message_ids->userdata);
+	struct ToxExtensionMessages *ext_messages = userdata;
+	get_or_insert_incoming_message(ext_messages, friend_id);
+	if (!compatible) {
+		ext_messages->negotiated_cb(friend_id, compatible,
+					    ext_messages->userdata);
+	} else {
+		tox_extension_messages_negotiate_size(ext_messages,
+						      response_packet_list);
+	}
 }
 
-struct ToxExtensionMessages *tox_extension_messages_register(
-	struct ToxExt *toxext, tox_extension_messages_received_cb cb,
-	tox_extension_messages_receipt_cb receipt_cb,
-	tox_extension_messages_negotiate_cb neg_cb, void *userdata)
+struct ToxExtensionMessages *
+tox_extension_messages_register(struct ToxExt *toxext,
+				tox_extension_messages_received_cb cb,
+				tox_extension_messages_receipt_cb receipt_cb,
+				tox_extension_messages_negotiate_cb neg_cb,
+				void *userdata, uint64_t max_receive_size)
 {
 	assert(cb);
 
@@ -312,6 +464,9 @@ struct ToxExtensionMessages *tox_extension_messages_register(
 	extension->receipt_cb = receipt_cb;
 	extension->negotiated_cb = neg_cb;
 	extension->userdata = userdata;
+	extension->max_sending_message_sizes = NULL;
+	extension->max_receiving_message_size = max_receive_size;
+	extension->ongoing_invalid_messages = NULL;
 
 	if (!extension->extension_handle) {
 		free(extension);
@@ -327,6 +482,8 @@ void tox_extension_messages_free(struct ToxExtensionMessages *extension)
 		free(extension->incoming_messages[i].message);
 	}
 	free(extension->incoming_messages);
+	free(extension->max_sending_message_sizes);
+	free(extension->ongoing_invalid_messages);
 	free(extension);
 }
 
@@ -372,8 +529,21 @@ tox_extension_messages_chunk(bool first_chunk, uint8_t const *data, size_t size,
 
 uint64_t tox_extension_messages_append(struct ToxExtensionMessages *extension,
 				       struct ToxExtPacketList *packet_list,
-				       uint8_t const *data, size_t size)
+				       uint8_t const *data, size_t size,
+				       uint32_t friend_id,
+				       enum Tox_Extension_Messages_Error *err)
 {
+	enum Tox_Extension_Messages_Error get_max_err;
+	uint64_t max_sending_size = tox_extension_messages_get_max_sending_size(
+		extension, friend_id, &get_max_err);
+	if (get_max_err != TOX_EXTENSION_MESSAGES_SUCCESS ||
+	    size > max_sending_size) {
+		if (err) {
+			*err = TOX_EXTENSION_MESSAGES_INVALID_ARG;
+		}
+		return -1;
+	}
+
 	uint8_t const *end = data + size;
 	uint8_t const *next_chunk = data;
 	bool first_chunk = true;
@@ -389,5 +559,36 @@ uint64_t tox_extension_messages_append(struct ToxExtensionMessages *extension,
 		toxext_segment_append(packet_list, extension->extension_handle,
 				      extension_data, size_for_chunk);
 	} while (end > next_chunk);
+
+	if (err) {
+		*err = TOX_EXTENSION_MESSAGES_SUCCESS;
+	}
 	return receipt_id;
+}
+
+uint64_t tox_extension_messages_get_max_receiving_size(
+	struct ToxExtensionMessages *extension)
+{
+	return extension->max_receiving_message_size;
+}
+
+uint64_t tox_extension_messages_get_max_sending_size(
+	struct ToxExtensionMessages *extension, uint32_t friend_id,
+	enum Tox_Extension_Messages_Error *err)
+{
+	for (size_t i = 0; i < extension->num_negotiated; ++i) {
+		if (extension->max_sending_message_sizes[i].friend_id ==
+		    friend_id) {
+			if (err) {
+				*err = TOX_EXTENSION_MESSAGES_SUCCESS;
+			}
+			return extension->max_sending_message_sizes[i]
+				.max_sending_message_size;
+		}
+	}
+
+	if (err) {
+		*err = TOX_EXTENSION_MESSAGES_INVALID_ARG;
+	}
+	return 0;
 }
