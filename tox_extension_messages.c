@@ -1,11 +1,11 @@
+#include "tox_extension_messages.h"
+
 #include <toxext/toxext.h>
 #include <toxext/toxext_util.h>
 
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "tox_extension_messages.h"
 
 static uint8_t const uuid[16] = { 0x9e, 0x10, 0x03, 0x16, 0xd2, 0x6f,
 				  0x45, 0x39, 0x8c, 0xdb, 0xae, 0x81,
@@ -199,7 +199,7 @@ void tox_extension_messages_handle_message_finish(
 	struct ToxExtensionMessages *extension, uint32_t friend_id,
 	struct MessagesPacket *parsed_packet,
 	struct IncomingMessage *incoming_message,
-	struct ToxExtPacketList *response_packet)
+	struct ToxExtPacketList *response_packet_list)
 {
 	/* We can skip the allocate/memcpy here */
 	if (incoming_message->size == 0) {
@@ -212,7 +212,7 @@ void tox_extension_messages_handle_message_finish(
 		uint8_t data[9];
 		data[0] = MESSAGE_RECEIVED;
 		toxext_write_to_buf(parsed_packet->receipt_id, data + 1, 8);
-		toxext_segment_append(response_packet,
+		toxext_segment_append(response_packet_list,
 				      extension->extension_handle, data, 9);
 
 		return;
@@ -228,15 +228,17 @@ void tox_extension_messages_handle_message_finish(
 	uint8_t data[9];
 	data[0] = MESSAGE_RECEIVED;
 	toxext_write_to_buf(parsed_packet->receipt_id, data + 1, 8);
-	toxext_segment_append(response_packet, extension->extension_handle,
+	toxext_segment_append(response_packet_list, extension->extension_handle,
 			      data, 9);
 
 	clear_incoming_message(incoming_message);
 }
 
-static void tox_extension_messages_recv(
-	struct ToxExtExtension *extension, uint32_t friend_id, void const *data,
-	size_t size, void *userdata, struct ToxExtPacketList *response_packet)
+static void
+tox_extension_messages_recv(struct ToxExtExtension *extension,
+			    uint32_t friend_id, void const *data, size_t size,
+			    void *userdata,
+			    struct ToxExtPacketList *response_packet_list)
 {
 	(void)extension;
 	struct ToxExtensionMessages *ext_messages = userdata;
@@ -263,7 +265,7 @@ static void tox_extension_messages_recv(
 	case MESSAGE_FINISH:
 		tox_extension_messages_handle_message_finish(
 			ext_messages, friend_id, &parsed_packet,
-			incoming_message, response_packet);
+			incoming_message, response_packet_list);
 		return;
 	case MESSAGE_RECEIVED:
 		ext_messages->receipt_cb(friend_id, parsed_packet.receipt_id,
@@ -294,6 +296,11 @@ struct ToxExtensionMessages *tox_extension_messages_register(
 
 	struct ToxExtensionMessages *extension =
 		malloc(sizeof(struct ToxExtensionMessages));
+
+	if (!extension) {
+		return NULL;
+	}
+
 	extension->extension_handle =
 		toxext_register(toxext, uuid, extension,
 				tox_extension_messages_recv,
@@ -335,9 +342,9 @@ tox_extension_messages_chunk(bool first_chunk, uint8_t const *data, size_t size,
 			     size_t *output_size)
 {
 	uint8_t const *ret;
-	bool bLastChunk = size <= TOXEXT_MAX_SEGMENT_SIZE - 9;
+	bool last_chunk = size <= TOXEXT_MAX_SEGMENT_SIZE - 9;
 
-	if (bLastChunk) {
+	if (last_chunk) {
 		extension_data[0] = MESSAGE_FINISH;
 		toxext_write_to_buf(receipt_id, extension_data + 1, 8);
 
