@@ -46,11 +46,11 @@ void tox_extension_messages_negotiate(struct ToxExtensionMessages *extension,
 				      uint32_t friend_id);
 
 /**
- * Append message data to to packet associated with this extension instance
+ * Append message data to a packet list associated with this extension instance
  *
  * Returns an id which will be used in the receipt_cb to indicate the message
  * has been received by the friend
  */
 uint64_t tox_extension_messages_append(struct ToxExtensionMessages *extension,
-				       struct ToxExtPacketList *packet,
+				       struct ToxExtPacketList *packet_list,
 				       uint8_t const *data, size_t size);
