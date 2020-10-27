@@ -157,18 +157,95 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 	return true;
 }
 
+void tox_extension_copy_in_message_data(struct MessagesPacket *parsed_packet,
+					struct IncomingMessage *incoming_message)
+{
+	if (parsed_packet->message_size + incoming_message->size >
+	    incoming_message->capacity) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		clear_incoming_message(incoming_message);
+		return;
+	}
+
+	memcpy(incoming_message->message + incoming_message->size,
+	       parsed_packet->message_data, parsed_packet->message_size);
+	incoming_message->size += parsed_packet->message_size;
+}
+
+void tox_extension_messages_handle_message_start(
+	struct MessagesPacket *parsed_packet,
+	struct IncomingMessage *incoming_message)
+{
+	/*
+		* realloc here instead of malloc because we may have dropped half a message
+		* if a user went offline half way through sending
+		*/
+	uint8_t *resized_message = realloc(incoming_message->message,
+					   parsed_packet->total_message_size);
+	if (!resized_message) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		clear_incoming_message(incoming_message);
+		return;
+	}
+
+	incoming_message->message = resized_message;
+	incoming_message->size = 0;
+	incoming_message->capacity = parsed_packet->total_message_size;
+
+	tox_extension_copy_in_message_data(parsed_packet, incoming_message);
+}
+
+void tox_extension_messages_handle_message_finish(
+	struct ToxExtensionMessages *extension, uint32_t friend_id,
+	struct MessagesPacket *parsed_packet,
+	struct IncomingMessage *incoming_message,
+	struct ToxExtPacketList *response_packet)
+{
+	/* We can skip the allocate/memcpy here */
+	if (incoming_message->size == 0) {
+		if (extension->cb) {
+			extension->cb(friend_id, parsed_packet->message_data,
+				      parsed_packet->message_size,
+				      extension->userdata);
+		}
+
+		uint8_t data[9];
+		data[0] = MESSAGE_RECEIVED;
+		toxext_write_to_buf(parsed_packet->receipt_id, data + 1, 8);
+		toxext_segment_append(response_packet,
+				      extension->extension_handle, data, 9);
+
+		return;
+	}
+
+	tox_extension_copy_in_message_data(parsed_packet, incoming_message);
+
+	if (extension->cb) {
+		extension->cb(friend_id, incoming_message->message,
+			      incoming_message->size, extension->userdata);
+	}
+
+	uint8_t data[9];
+	data[0] = MESSAGE_RECEIVED;
+	toxext_write_to_buf(parsed_packet->receipt_id, data + 1, 8);
+	toxext_segment_append(response_packet, extension->extension_handle,
+			      data, 9);
+
+	clear_incoming_message(incoming_message);
+}
+
 // Here they confirm that they are indeed sending us messages. We don't call the
 // negotation callback when we've both negotiated that we have the extension
 // because at that point they don't know we can accept the message ids. We wait for
 // an enable flag from the other side to indicate that they are now embedding message ids.
 static void tox_extension_messages_recv(
 	struct ToxExtExtension *extension, uint32_t friend_id, void const *data,
-	size_t size, void *userdata, struct ToxExtPacketList *response_packet_list)
+	size_t size, void *userdata, struct ToxExtPacketList *response_packet)
 {
 	(void)extension;
-	struct ToxExtensionMessages *ext_message_ids = userdata;
+	struct ToxExtensionMessages *ext_messages = userdata;
 	struct IncomingMessage *incoming_message =
-		get_incoming_message(ext_message_ids, friend_id);
+		get_incoming_message(ext_messages, friend_id);
 
 	struct MessagesPacket parsed_packet;
 	if (!parse_messages_packet(data, size, &parsed_packet)) {
@@ -177,85 +254,32 @@ static void tox_extension_messages_recv(
 		return;
 	}
 
-	if (parsed_packet.message_type == MESSAGE_RECEIVED) {
-		ext_message_ids->receipt_cb(friend_id, parsed_packet.receipt_id,
-					    ext_message_ids->userdata);
+	switch (parsed_packet.message_type) {
+	case MESSAGE_START:
+		tox_extension_messages_handle_message_start(&parsed_packet,
+							    incoming_message);
+		return;
+	case MESSAGE_PART: {
+		tox_extension_copy_in_message_data(&parsed_packet,
+						   incoming_message);
 		return;
 	}
-
-	if (parsed_packet.message_type == MESSAGE_START) {
-		/*
-		 * realloc here instead of malloc because we may have dropped half a message
-		 * if a user went offline half way through sending
-		 */
-		uint8_t *resized_message =
-			realloc(incoming_message->message,
-				parsed_packet.total_message_size);
-		if (!resized_message) {
-			/* FIXME: We should probably tell the sender that we dropped a message here */
-			clear_incoming_message(incoming_message);
-			return;
-		}
-
-		incoming_message->message = resized_message;
-		incoming_message->size = 0;
-		incoming_message->capacity = parsed_packet.total_message_size;
-	}
-
-	if (parsed_packet.message_type == MESSAGE_FINISH &&
-	    incoming_message->size == 0) {
-		/* We can skip the allocate/memcpy here */
-		if (ext_message_ids->cb) {
-			ext_message_ids->cb(friend_id,
-					    parsed_packet.message_data,
-					    parsed_packet.message_size,
-					    ext_message_ids->userdata);
-		}
-
-		uint8_t data[9];
-		data[0] = MESSAGE_RECEIVED;
-		toxext_write_to_buf(parsed_packet.receipt_id, data + 1, 8);
-		toxext_segment_append(response_packet_list,
-				     ext_message_ids->extension_handle, data,
-				     9);
-
+	case MESSAGE_FINISH:
+		tox_extension_messages_handle_message_finish(
+			ext_messages, friend_id, &parsed_packet,
+			incoming_message, response_packet);
 		return;
-	}
-
-	if (parsed_packet.message_size + incoming_message->size >
-	    incoming_message->capacity) {
-		/* FIXME: We should probably tell the sender that we dropped a message here */
-		clear_incoming_message(incoming_message);
+	case MESSAGE_RECEIVED:
+		ext_messages->receipt_cb(friend_id, parsed_packet.receipt_id,
+					 ext_messages->userdata);
 		return;
-	}
-
-	memcpy(incoming_message->message + incoming_message->size,
-	       parsed_packet.message_data, parsed_packet.message_size);
-	incoming_message->size += parsed_packet.message_size;
-
-	if (parsed_packet.message_type == MESSAGE_FINISH) {
-		if (ext_message_ids->cb) {
-			ext_message_ids->cb(friend_id,
-					    incoming_message->message,
-					    incoming_message->size,
-					    ext_message_ids->userdata);
-		}
-
-		uint8_t data[9];
-		data[0] = MESSAGE_RECEIVED;
-		toxext_write_to_buf(parsed_packet.receipt_id, data + 1, 8);
-		toxext_segment_append(response_packet_list,
-				     ext_message_ids->extension_handle, data,
-				     9);
-
-		clear_incoming_message(incoming_message);
 	}
 }
 
-static void tox_extension_messages_neg(struct ToxExtExtension *extension,
-				       uint32_t friend_id, bool compatible,
-				       void *userdata,
-				       struct ToxExtPacketList *response_packet_list)
+static void
+tox_extension_messages_neg(struct ToxExtExtension *extension,
+			   uint32_t friend_id, bool compatible, void *userdata,
+			   struct ToxExtPacketList *response_packet_list)
 {
 	(void)extension;
 	(void)response_packet_list;
@@ -360,7 +384,7 @@ uint64_t tox_extension_messages_append(struct ToxExtensionMessages *extension,
 		first_chunk = false;
 
 		toxext_segment_append(packet_list, extension->extension_handle,
-				     extension_data, size_for_chunk);
+				      extension_data, size_for_chunk);
 	} while (end > next_chunk);
 	return receipt_id;
 }
