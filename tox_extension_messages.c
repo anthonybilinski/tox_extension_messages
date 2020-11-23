@@ -128,7 +128,7 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 		return true;
 	}
 
-	if (messages_packet->message_type == MESSAGE_START) {
+	else if (messages_packet->message_type == MESSAGE_START) {
 		if (it + 8 > end) {
 			return false;
 		}
@@ -138,13 +138,13 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 		it += 8;
 	}
 
-	if (messages_packet->message_type == MESSAGE_FINISH) {
+	else if (messages_packet->message_type == MESSAGE_FINISH) {
 		messages_packet->receipt_id =
 			toxext_read_from_buf(uint64_t, it, 8);
 		it += 8;
 	}
 
-	if (messages_packet->message_type == MESSAGE_NEGOTIATE) {
+	else if (messages_packet->message_type == MESSAGE_NEGOTIATE) {
 		messages_packet->max_sending_message_size =
 			toxext_read_from_buf(uint64_t, it, 8);
 		it += 8;
