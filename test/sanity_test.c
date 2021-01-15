@@ -30,10 +30,11 @@ static void test_receipt_cb(uint32_t friend_number, const uint64_t receipt_id,
 }
 
 static void test_neg_cb(uint32_t friend_number, bool compatible,
-			void *user_data)
+			uint64_t max_sending_size, void *user_data)
 {
 	(void)friend_number;
 	(void)compatible;
+	(void)max_sending_size;
 	(void)user_data;
 }
 

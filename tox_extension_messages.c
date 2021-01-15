@@ -225,15 +225,19 @@ void tox_extension_messages_handle_message_finish(
 	struct ToxExtPacketList *response_packet_list)
 {
 	struct IncomingMessage *incoming_message = &friend_data->message;
+	bool const end_of_dropped_message = friend_data->drop_incoming_message;
+
+	friend_data->drop_incoming_message = false;
+
+	if (end_of_dropped_message) {
+		/* FIXME: We should probably tell the sender that we dropped a message here */
+		clear_incoming_message(incoming_message);
+		return;
+	}
 
 	/* We can skip the allocate/memcpy here */
 	if (incoming_message->size == 0) {
-		bool end_of_dropped_message =
-			friend_data->drop_incoming_message;
-		friend_data->drop_incoming_message = false;
-
-		if (end_of_dropped_message ||
-		    extension->max_receiving_message_size <
+		if (extension->max_receiving_message_size <
 			    parsed_packet->message_size) {
 			/* FIXME: We should probably tell the sender that we dropped a message here */
 			clear_incoming_message(incoming_message);
@@ -257,11 +261,7 @@ void tox_extension_messages_handle_message_finish(
 
 	tox_extension_copy_in_message_data(parsed_packet, incoming_message);
 
-	bool end_of_dropped_message = friend_data->drop_incoming_message;
-	friend_data->drop_incoming_message = false;
-
-	if (end_of_dropped_message ||
-	    extension->max_receiving_message_size < incoming_message->size) {
+	if (extension->max_receiving_message_size < incoming_message->size) {
 		/* FIXME: We should probably tell the sender that we dropped a message here */
 		clear_incoming_message(incoming_message);
 		return;
@@ -321,7 +321,7 @@ tox_extension_messages_recv(struct ToxExtExtension *extension,
 		friend_data->max_sending_size =
 			parsed_packet.max_sending_message_size;
 		ext_messages->negotiated_cb(friend_id, true,
-					    ext_messages->userdata);
+						friend_data->max_sending_size, ext_messages->userdata);
 		return;
 	case MESSAGE_START:
 		tox_extension_messages_handle_message_start(
@@ -355,7 +355,7 @@ tox_extension_messages_neg(struct ToxExtExtension *extension,
 	get_or_insert_friend_data(ext_messages, friend_id);
 
 	if (!compatible) {
-		ext_messages->negotiated_cb(friend_id, compatible,
+		ext_messages->negotiated_cb(friend_id, compatible, 0,
 					    ext_messages->userdata);
 	} else {
 		tox_extension_messages_negotiate_size(ext_messages,
