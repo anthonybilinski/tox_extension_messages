@@ -152,6 +152,12 @@ bool parse_messages_packet(uint8_t const *data, size_t size,
 		it += 8;
 	}
 
+	else if (messages_packet->message_type == MESSAGE_NEGOTIATE) {
+		messages_packet->max_sending_message_size =
+			toxext_read_from_buf(uint64_t, it, 8);
+		it += 8;
+	}
+
 	if (it > end) {
 		return false;
 	}
@@ -307,7 +313,7 @@ tox_extension_messages_recv(struct ToxExtExtension *extension,
 		friend_data->max_sending_size =
 			parsed_packet.max_sending_message_size;
 		ext_messages->negotiated_cb(friend_id, true,
-					    ext_messages->userdata);
+						friend_data->max_sending_size, ext_messages->userdata);
 		return;
 	case MESSAGE_START:
 		tox_extension_messages_handle_message_start(
@@ -341,7 +347,7 @@ tox_extension_messages_neg(struct ToxExtExtension *extension,
 	get_or_insert_friend_data(ext_messages, friend_id);
 
 	if (!compatible) {
-		ext_messages->negotiated_cb(friend_id, compatible,
+		ext_messages->negotiated_cb(friend_id, compatible, 0,
 					    ext_messages->userdata);
 	} else {
 		/*

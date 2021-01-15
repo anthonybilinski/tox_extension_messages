@@ -33,7 +33,8 @@ typedef void (*tox_extension_messages_receipt_cb)(uint32_t friend_number,
  */
 typedef void (*tox_extension_messages_negotiate_cb)(uint32_t friend_number,
 						    bool negotiated,
-						    void *user_data);
+						    uint64_t max_sending_size,
+							void *user_data);
 
 /**
  * Register a new extension instance with toxext
